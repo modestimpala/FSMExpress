@@ -134,6 +134,23 @@
           Header="Open _last" Command="{Binding FileOpenLast}"
           IsEnabled="{Binding LastOpenedPath, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
           HotKey="Ctrl+T" InputGesture="Ctrl+T" />
+        <Separator />
+        <MenuItem
+          Header="Select _another FSM from this file" Command="{Binding SelectAnotherFsmCommand}"
+          IsEnabled="{Binding !!ActiveDocument}"
+          HotKey="Ctrl+Shift+O" InputGesture="Ctrl+Shift+O" />
+      </MenuItem>
+      <MenuItem Header="_Export">
+        <MenuItem
+          Header="Export current FSM (detailed _JSON)" Command="{Binding ExportDetailedJsonCommand}"
+          IsEnabled="{Binding !!ActiveDocument}" />
+        <MenuItem
+          Header="Export current FSM (_graph JSON)" Command="{Binding ExportGraphJsonCommand}"
+          IsEnabled="{Binding !!ActiveDocument}" />
+        <Separator />
+        <MenuItem
+          Header="Export _all open FSMs (detailed JSON)" Command="{Binding ExportAllDetailedJsonCommand}"
+          IsEnabled="{Binding !!Documents.Count}" />
       </MenuItem>
       <MenuItem Header="_Config">
         <MenuItem

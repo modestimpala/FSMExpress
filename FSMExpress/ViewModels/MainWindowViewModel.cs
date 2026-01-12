@@ -1,12 +1,15 @@
 ﻿using AddressablesTools;
 using AddressablesTools.Catalog;
+using AssetsTools.NET;
 using AssetsTools.NET.Extra;
 using Avalonia.Platform.Storage;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.DependencyInjection;
+using CommunityToolkit.Mvvm.Input;
 using FSMExpress.Common.Assets;
 using FSMExpress.Common.Document;
 using FSMExpress.Logic.Configuration;
+using FSMExpress.Logic.Export;
 using FSMExpress.Logic.Fsm;
 using FSMExpress.Logic.Util;
 using FSMExpress.PlayMaker;
@@ -139,23 +142,156 @@ public partial class MainWindowViewModel : ViewModelBase
         return fsmChoices.Select(fsm =>
         {
             var fsmFileInst = _manager.FileLookup[fsm.Ptr.FilePath.ToLowerInvariant()];
-
-            // If we have a cached baseField (for negative type IDs), use it
-            if (fsm.CachedBaseField != null)
+            var info = fsmFileInst.file.GetAssetInfo(fsm.Ptr.PathId);
+            
+            // For negative type IDs, use ReadMonoBehaviourSafe to properly load with template enhancement
+            if (info.TypeId < 0)
             {
+                var baseField = ReadMonoBehaviourSafe(_manager, fsmFileInst, info);
                 return new AssetExternal
                 {
                     file = fsmFileInst,
-                    info = fsmFileInst.file.GetAssetInfo(fsm.Ptr.PathId),
-                    baseField = fsm.CachedBaseField
+                    info = info,
+                    baseField = baseField
                 };
             }
-
+            
             return _manager.GetExtAsset(fsmFileInst, 0, fsm.Ptr.PathId);
         });
     }
 
-    private async void LoadPlaymakerFsm(AssetExternal fsmExt)
+    /// <summary>
+    /// Reads a MonoBehaviour asset using UABEA's method with RefTypeManager support for Unity 5.0
+    /// </summary>
+    private static AssetTypeValueField? ReadMonoBehaviourSafe(AssetsManager manager, AssetsFileInstance fileInst, AssetFileInfo info)
+    {
+        try
+        {
+            // For negative type IDs (custom MonoBehaviours in Unity 5.0), we need to manually
+            // get the enhanced template and use it to read the asset
+            if (info.TypeId < 0)
+            {
+                ushort monoId = info.GetScriptIndex(assetsFile: fileInst.file);
+                long position = info.GetAbsoluteByteOffset(fileInst.file);
+
+                // Get base MonoBehaviour template
+                var template = manager.GetTemplateBaseField(
+                    fileInst,
+                    fileInst.file.Reader,
+                    position,
+                    info.TypeId,
+                    monoId,
+                    AssetReadFlags.None
+                );
+
+                if (template != null)
+                {
+                    bool templateHasFsm = template.Children.Any(f => f.Name == "fsm");
+
+                    // If template doesn't have fsm field yet, try to enhance it using MonoTempGenerator
+                    if (!templateHasFsm && manager.MonoTempGenerator != null && monoId != 0xFFFF)
+                    {
+                        try
+                        {
+                            // Read m_Script PPtr to get MonoScript info
+                            AssetTypeValueField? tempBaseField = null;
+                            lock (fileInst.LockReader)
+                            {
+                                // IMPORTANT: Reset position before reading
+                                fileInst.file.Reader.Position = position;
+                                tempBaseField = template.MakeValue(fileInst.file.Reader, position);
+                            }
+
+                            var scriptPPtr = tempBaseField?["m_Script"];
+                            if (scriptPPtr != null)
+                            {
+                                int scriptFileId = scriptPPtr["m_FileID"].AsInt;
+                                long scriptPathId = scriptPPtr["m_PathID"].AsLong;
+
+                                // Get the file containing the MonoScript
+                                AssetsFileInstance? scriptFileInst = fileInst;
+                                if (scriptFileId != 0)
+                                {
+                                    var dep = fileInst.GetDependency(manager, scriptFileId - 1);
+                                    if (dep != null)
+                                    {
+                                        scriptFileInst = dep;
+                                    }
+                                }
+
+                                if (scriptFileInst != null)
+                                {
+                                    var scriptInfo = scriptFileInst.file.GetAssetInfo(scriptPathId);
+                                    if (scriptInfo != null)
+                                    {
+                                        var monoScriptBaseField = manager.GetBaseField(scriptFileInst, scriptInfo);
+                                        if (monoScriptBaseField != null)
+                                        {
+                                            var classNameField = monoScriptBaseField["m_ClassName"];
+                                            var namespaceField = monoScriptBaseField["m_Namespace"];
+                                            var assemblyNameField = monoScriptBaseField["m_AssemblyName"];
+
+                                            if (classNameField != null && assemblyNameField != null)
+                                            {
+                                                string scriptClassName = classNameField.AsString;
+                                                string scriptNamespace = namespaceField?.AsString ?? string.Empty;
+                                                string assemblyName = assemblyNameField.AsString;
+
+                                                var enhancedTemplate = manager.MonoTempGenerator.GetTemplateField(
+                                                    template,
+                                                    assemblyName,
+                                                    scriptNamespace,
+                                                    scriptClassName,
+                                                    new UnityVersion(fileInst.file.Metadata.UnityVersion)
+                                                );
+
+                                                if (enhancedTemplate != null)
+                                                {
+                                                    template = enhancedTemplate;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // Failed to enhance, continue with base template
+                        }
+                    }
+
+                    // Now create the final value field using the (possibly enhanced) template
+                    // IMPORTANT: Reset reader position before reading with the enhanced template
+                    RefTypeManager? refMan = manager.GetRefTypeManager(fileInst);
+                    
+                    lock (fileInst.LockReader)
+                    {
+                        fileInst.file.Reader.Position = position;
+                        return template.MakeValue(
+                            fileInst.file.Reader,
+                            position,
+                            refMan
+                        );
+                    }
+                }
+
+                return null;
+            }
+            else
+            {
+                // For non-negative type IDs, GetBaseField works fine
+                return manager.GetBaseField(fileInst, info);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ReadMonoBehaviourSafe exception: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async void LoadPlaymakerFsm(AssetExternal fsmExt, string sourceFilePath)
     {
         try
         {
@@ -222,6 +358,7 @@ public partial class MainWindowViewModel : ViewModelBase
             }
 
             var fsmDoc = fsmObject.MakeDocument();
+            fsmDoc.SourceName = sourceFilePath;
             Documents.Add(fsmDoc);
             ActiveDocument = fsmDoc;
         }
@@ -258,7 +395,7 @@ public partial class MainWindowViewModel : ViewModelBase
 
         foreach (var fsm in selectedFsms)
         {
-            LoadPlaymakerFsm(fsm);
+            LoadPlaymakerFsm(fsm, fileName);
         }
     }
 
@@ -285,7 +422,7 @@ public partial class MainWindowViewModel : ViewModelBase
 
         foreach (var fsm in selectedFsms)
         {
-            LoadPlaymakerFsm(fsm);
+            LoadPlaymakerFsm(fsm, scenePath);
         }
     }
 
@@ -308,7 +445,7 @@ public partial class MainWindowViewModel : ViewModelBase
 
         foreach (var fsm in selectedFsms)
         {
-            LoadPlaymakerFsm(fsm);
+            LoadPlaymakerFsm(fsm, resourcesPath);
         }
     }
 
@@ -378,8 +515,163 @@ public partial class MainWindowViewModel : ViewModelBase
 
         foreach (var fsm in selectedFsms)
         {
-            LoadPlaymakerFsm(fsm);
+            LoadPlaymakerFsm(fsm, LastOpenedPath);
         }
+    }
+
+    [RelayCommand]
+    public async Task SelectAnotherFsm()
+    {
+        if (ActiveDocument?.SourceName is not { } sourcePath)
+        {
+            await MessageBoxUtil.ShowDialog("No active document", "Please open a file first before selecting another FSM.");
+            return;
+        }
+
+        if (!File.Exists(sourcePath))
+        {
+            await MessageBoxUtil.ShowDialog($"File not found", $"The source file no longer exists:\n{sourcePath}");
+            return;
+        }
+
+        var selectedFsms = await PickFsms(sourcePath);
+        if (selectedFsms is null)
+            return;
+
+        foreach (var fsm in selectedFsms)
+        {
+            LoadPlaymakerFsm(fsm, sourcePath);
+        }
+    }
+
+    [RelayCommand]
+    public async Task ExportDetailedJson()
+    {
+        if (ActiveDocument is null)
+        {
+            await MessageBoxUtil.ShowDialog("No active document", "Please open an FSM first before exporting.");
+            return;
+        }
+
+        var storageProvider = StorageService.GetStorageProvider();
+        if (storageProvider is null)
+            return;
+
+        var suggestedName = $"{ActiveDocument.Name}_detailed.json".Replace(" ", "_");
+        var result = await storageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export FSM to Detailed JSON",
+            SuggestedFileName = suggestedName,
+            DefaultExtension = "json",
+            FileTypeChoices =
+            [
+                new FilePickerFileType("JSON Files") { Patterns = ["*.json"] },
+                StorageService.Any
+            ]
+        });
+
+        if (result is null)
+            return;
+
+        try
+        {
+            var filePath = result.Path.LocalPath;
+            FsmJsonExporter.ExportDetailed(ActiveDocument, filePath);
+            await MessageBoxUtil.ShowDialog("Export Successful", 
+                $"FSM exported to:\n{filePath}\n\nThis format includes all state actions, variables, and events.");
+        }
+        catch (Exception ex)
+        {
+            await MessageBoxUtil.ShowDialog("Export Failed", $"Failed to export FSM:\n{ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    public async Task ExportGraphJson()
+    {
+        if (ActiveDocument is null)
+        {
+            await MessageBoxUtil.ShowDialog("No active document", "Please open an FSM first before exporting.");
+            return;
+        }
+
+        var storageProvider = StorageService.GetStorageProvider();
+        if (storageProvider is null)
+            return;
+
+        var suggestedName = $"{ActiveDocument.Name}_graph.json".Replace(" ", "_");
+        var result = await storageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export FSM to Graph JSON",
+            SuggestedFileName = suggestedName,
+            DefaultExtension = "json",
+            FileTypeChoices =
+            [
+                new FilePickerFileType("JSON Files") { Patterns = ["*.json"] },
+                StorageService.Any
+            ]
+        });
+
+        if (result is null)
+            return;
+
+        try
+        {
+            var filePath = result.Path.LocalPath;
+            FsmJsonExporter.ExportGraph(ActiveDocument, filePath);
+            await MessageBoxUtil.ShowDialog("Export Successful", 
+                $"FSM exported to:\n{filePath}\n\nThis format is optimized for graph/flow analysis.");
+        }
+        catch (Exception ex)
+        {
+            await MessageBoxUtil.ShowDialog("Export Failed", $"Failed to export FSM:\n{ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    public async Task ExportAllDetailedJson()
+    {
+        if (Documents.Count == 0)
+        {
+            await MessageBoxUtil.ShowDialog("No documents", "Please open at least one FSM before exporting.");
+            return;
+        }
+
+        var storageProvider = StorageService.GetStorageProvider();
+        if (storageProvider is null)
+            return;
+
+        var result = await storageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Select folder to export all FSMs"
+        });
+
+        var folderNames = FileDialogUtils.GetOpenFolderDialogFolders(result);
+        if (folderNames.Length == 0)
+            return;
+
+        var folderPath = folderNames[0];
+        int successCount = 0;
+        int failCount = 0;
+
+        foreach (var doc in Documents)
+        {
+            try
+            {
+                var fileName = $"{doc.Name}_detailed.json".Replace(" ", "_");
+                var filePath = Path.Combine(folderPath, fileName);
+                FsmJsonExporter.ExportDetailed(doc, filePath);
+                successCount++;
+            }
+            catch
+            {
+                failCount++;
+            }
+        }
+
+        await MessageBoxUtil.ShowDialog("Batch Export Complete", 
+            $"Exported {successCount} FSM(s) successfully.\n" +
+            (failCount > 0 ? $"{failCount} FSM(s) failed to export." : ""));
     }
 
     public async void ConfigSetGamePath()

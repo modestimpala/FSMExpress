@@ -120,12 +120,11 @@ public partial class FsmSelectorViewModel : ViewModelBase, IDialogAware<IList<Fs
             {
                 try
                 {
-                    var baseField = ReadMonoBehaviourSafe(_manager, _fileInst, info);
-                    if (baseField != null && baseField["fsm"] != null && !baseField["fsm"].IsDummy)
+                    var fsmName = GetFSMNameFast(_manager, _fileInst, info, afNamer);
+                    if (fsmName != null)
                     {
-                        var fsmName = GetFSMNameSafe(_manager, _fileInst, info, afNamer, baseField);
                         var fsmPtr = new AssetPPtr(_fileInst.name, info.PathId);
-                        _internalEntries.Add(new FsmSelectorListEntry(fsmName, fsmPtr, baseField));
+                        _internalEntries.Add(new FsmSelectorListEntry(fsmName, fsmPtr));
                     }
                 }
                 catch
@@ -141,12 +140,11 @@ public partial class FsmSelectorViewModel : ViewModelBase, IDialogAware<IList<Fs
             {
                 try
                 {
-                    var baseField = ReadMonoBehaviourSafe(_manager, _fileInst, info);
-                    if (baseField != null && baseField["fsm"] != null && !baseField["fsm"].IsDummy)
+                    var fsmName = GetFSMNameFast(_manager, _fileInst, info, afNamer);
+                    if (fsmName != null)
                     {
-                        var fsmName = GetFSMNameSafe(_manager, _fileInst, info, afNamer, baseField);
                         var fsmPtr = new AssetPPtr(_fileInst.name, info.PathId);
-                        _internalEntries.Add(new FsmSelectorListEntry(fsmName, fsmPtr, baseField));
+                        _internalEntries.Add(new FsmSelectorListEntry(fsmName, fsmPtr));
                     }
                 }
                 catch
@@ -160,12 +158,11 @@ public partial class FsmSelectorViewModel : ViewModelBase, IDialogAware<IList<Fs
             {
                 try
                 {
-                    var baseField = ReadMonoBehaviourSafe(_manager, _fileInst, info);
-                    if (baseField != null)
+                    var fsmName = GetFSMNameFast(_manager, _fileInst, info, afNamer);
+                    if (fsmName != null)
                     {
-                        var fsmName = GetFSMNameSafe(_manager, _fileInst, info, afNamer, baseField);
                         var fsmPtr = new AssetPPtr(_fileInst.name, info.PathId);
-                        _internalEntries.Add(new FsmSelectorListEntry(fsmName, fsmPtr, baseField));
+                        _internalEntries.Add(new FsmSelectorListEntry(fsmName, fsmPtr));
                     }
                 }
                 catch (Exception ex)
@@ -387,26 +384,84 @@ public partial class FsmSelectorViewModel : ViewModelBase, IDialogAware<IList<Fs
         return $"{goName} - {fsmName}";
     }
 
-    private static string GetFSMNameFast(AssetsManager manager, AssetsFileInstance fileInst, AssetFileInfo info, AfAssetNamer namer)
+    private static string? GetFSMNameFast(AssetsManager manager, AssetsFileInstance fileInst, AssetFileInfo info, AfAssetNamer namer)
     {
-        var fsmTemp = manager.GetTemplateBaseField(fileInst, info);
-
-        var nameIndex = fsmTemp.Children.FindIndex(monoTemp => monoTemp.Name == "name");
-        if (nameIndex != -1)
+        try
         {
-            fsmTemp.Children.RemoveRange(nameIndex + 1, fsmTemp.Children.Count - (nameIndex + 1));
-        }
+            // For negative type IDs, we need the full safe read with template enhancement
+            if (info.TypeId < 0)
+            {
+                var baseField = ReadMonoBehaviourSafe(manager, fileInst, info);
+                if (baseField == null)
+                    return null;
+                
+                var fsmField = baseField["fsm"];
+                if (fsmField == null || fsmField.IsDummy)
+                    return null;
+                
+                string fsmName = "Unknown FSM";
+                string goName = "Unknown GameObject";
+                
+                try
+                {
+                    var nameField = fsmField["name"];
+                    if (nameField != null && !nameField.IsDummy)
+                    {
+                        fsmName = nameField.AsString;
+                    }
+                }
+                catch { }
+                
+                try
+                {
+                    var goPtr = baseField["m_GameObject"];
+                    if (goPtr != null && !goPtr.IsDummy)
+                    {
+                        var fileId = goPtr["m_FileID"];
+                        var pathId = goPtr["m_PathID"];
+                        if (fileId != null && !fileId.IsDummy && pathId != null && !pathId.IsDummy)
+                        {
+                            goName = namer.GetName(fileId.AsInt, pathId.AsLong);
+                        }
+                    }
+                }
+                catch { }
+                
+                return $"{goName} - {fsmName}";
+            }
+            
+            // For non-negative type IDs, use the fast method
+            var fsmTemp = manager.GetTemplateBaseField(fileInst, info);
+            
+            // Check if template has fsm field before attempting to read
+            if (!fsmTemp.Children.Any(f => f.Name == "fsm"))
+                return null;
 
-        AssetTypeValueField? monoBf;
-        lock (fileInst.LockReader)
+            var nameIndex = fsmTemp.Children.FindIndex(monoTemp => monoTemp.Name == "name");
+            if (nameIndex != -1)
+            {
+                fsmTemp.Children.RemoveRange(nameIndex + 1, fsmTemp.Children.Count - (nameIndex + 1));
+            }
+
+            AssetTypeValueField? monoBf;
+            lock (fileInst.LockReader)
+            {
+                monoBf = fsmTemp.MakeValue(fileInst.file.Reader, info.GetAbsoluteByteOffset(fileInst.file));
+            }
+
+            var fsmField2 = monoBf["fsm"];
+            if (fsmField2 == null || fsmField2.IsDummy)
+                return null;
+
+            var fsmName2 = fsmField2["name"].AsString;
+            var goPtr2 = monoBf["m_GameObject"];
+            var goName2 = namer.GetName(goPtr2["m_FileID"].AsInt, goPtr2["m_PathID"].AsLong);
+            return $"{goName2} - {fsmName2}";
+        }
+        catch
         {
-            monoBf = fsmTemp.MakeValue(fileInst.file.Reader, info.GetAbsoluteByteOffset(fileInst.file));
+            return null;
         }
-
-        var fsmName = monoBf["fsm"]["name"].AsString;
-        var goPtr = monoBf["m_GameObject"];
-        var goName = namer.GetName(goPtr["m_FileID"].AsInt, goPtr["m_PathID"].AsLong);
-        return $"{goName} - {fsmName}";
     }
 
     private static string GetFSMNameFastTemplate(AssetsManager manager, AssetsFileInstance fileInst, AssetFileInfo info, AfAssetNamer namer)
@@ -444,9 +499,8 @@ public partial class FsmSelectorViewModel : ViewModelBase, IDialogAware<IList<Fs
     }
 }
 
-public class FsmSelectorListEntry(string name, AssetPPtr ptr, AssetTypeValueField? cachedBaseField = null)
+public class FsmSelectorListEntry(string name, AssetPPtr ptr)
 {
     public string Name { get; } = name;
     public AssetPPtr Ptr { get; } = ptr;
-    public AssetTypeValueField? CachedBaseField { get; } = cachedBaseField;
 }
