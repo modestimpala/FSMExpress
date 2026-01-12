@@ -139,25 +139,67 @@ public partial class MainWindowViewModel : ViewModelBase
         return fsmChoices.Select(fsm =>
         {
             var fsmFileInst = _manager.FileLookup[fsm.Ptr.FilePath.ToLowerInvariant()];
+
+            // If we have a cached baseField (for negative type IDs), use it
+            if (fsm.CachedBaseField != null)
+            {
+                return new AssetExternal
+                {
+                    file = fsmFileInst,
+                    info = fsmFileInst.file.GetAssetInfo(fsm.Ptr.PathId),
+                    baseField = fsm.CachedBaseField
+                };
+            }
+
             return _manager.GetExtAsset(fsmFileInst, 0, fsm.Ptr.PathId);
         });
     }
 
-    private void LoadPlaymakerFsm(AssetExternal fsmExt)
+    private async void LoadPlaymakerFsm(AssetExternal fsmExt)
     {
-        var fsmBaseField = fsmExt.baseField;
-        var fsmFileInst = fsmExt.file;
+        try
+        {
+            var fsmBaseField = fsmExt.baseField;
+            var fsmFileInst = fsmExt.file;
 
-        var fsmObject = new FsmPlaymaker(new AfAssetField(fsmBaseField["fsm"], new AfAssetNamer(_manager, fsmFileInst)));
+            var fsmField = fsmBaseField["fsm"];
+            if (fsmField == null || fsmField.IsDummy)
+            {
+                await MessageBoxUtil.ShowDialog("Cannot load FSM", "The FSM field is invalid or missing. This asset may not be a valid PlayMaker FSM.");
+                return;
+            }
 
-        // get gameobject name
-        var namer = new AfAssetNamer(_manager, fsmFileInst);
-        var goPtr = fsmBaseField["m_GameObject"];
-        fsmObject.GoName = namer.GetName(goPtr["m_FileID"].AsInt, goPtr["m_PathID"].AsLong) ?? "<Unknown GO>";
+            var fsmObject = new FsmPlaymaker(new AfAssetField(fsmField, new AfAssetNamer(_manager, fsmFileInst)));
 
-        var fsmDoc = fsmObject.MakeDocument();
-        Documents.Add(fsmDoc);
-        ActiveDocument = fsmDoc;
+            // get gameobject name
+            var namer = new AfAssetNamer(_manager, fsmFileInst);
+            var goPtr = fsmBaseField["m_GameObject"];
+            if (goPtr != null && !goPtr.IsDummy)
+            {
+                var fileIdField = goPtr["m_FileID"];
+                var pathIdField = goPtr["m_PathID"];
+                if (fileIdField != null && !fileIdField.IsDummy && pathIdField != null && !pathIdField.IsDummy)
+                {
+                    fsmObject.GoName = namer.GetName(fileIdField.AsInt, pathIdField.AsLong) ?? "<Unknown GO>";
+                }
+                else
+                {
+                    fsmObject.GoName = "<Unknown GO>";
+                }
+            }
+            else
+            {
+                fsmObject.GoName = "<Unknown GO>";
+            }
+
+            var fsmDoc = fsmObject.MakeDocument();
+            Documents.Add(fsmDoc);
+            ActiveDocument = fsmDoc;
+        }
+        catch (Exception ex)
+        {
+            await MessageBoxUtil.ShowDialog("Error loading FSM", $"Failed to load FSM:\n{ex.Message}\n\nThis FSM may be corrupted or use an unsupported format.");
+        }
     }
 
     public async void FileOpen()
@@ -311,13 +353,35 @@ public partial class MainWindowViewModel : ViewModelBase
 
     public async void ConfigSetGamePath()
     {
-        // we're checking ggm path for sanity here
-        var ggmPath = await PickGamePathWithFile("globalgamemanagers");
-        if (ggmPath is null)
+        var storageProvider = StorageService.GetStorageProvider();
+        if (storageProvider is null)
             return;
 
-        ConfigurationManager.Settings.DefaultGamePath = Path.GetDirectoryName(ggmPath);
-        await TryLoadCatalog();
+        var result = await storageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Open a [Game name]_Data folder"
+        });
+
+        var folderNames = FileDialogUtils.GetOpenFolderDialogFolders(result);
+        if (folderNames.Length == 0)
+            return;
+
+        var folderName = folderNames[0];
+
+        // Set the path
+        ConfigurationManager.Settings.DefaultGamePath = folderName;
+
+        // Try to load catalog and give feedback
+        var catalogLoaded = await TryLoadCatalog();
+
+        if (catalogLoaded)
+        {
+            await MessageBoxUtil.ShowDialog("Success", $"Game path set to:\n{folderName}\n\nCatalog loaded successfully.");
+        }
+        else
+        {
+            await MessageBoxUtil.ShowDialog("Warning", $"Game path set to:\n{folderName}\n\nNo addressables catalog found at:\nStreamingAssets/aa/catalog.bin or catalog.json\n\nThis is normal for some games. You can still open files manually.");
+        }
     }
 
     public void CloseTab()
