@@ -6,7 +6,15 @@ public class AfAssetField(AssetTypeValueField valueField, AfAssetNamer namer) : 
 {
     public bool Exists(string name)
     {
-        return !valueField[name].IsDummy;
+        try
+        {
+            var field = valueField[name];
+            return field != null && !field.IsDummy;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public bool Exists(int index)
@@ -26,7 +34,24 @@ public class AfAssetField(AssetTypeValueField valueField, AfAssetNamer namer) : 
 
     public T GetValue<T>(string name)
     {
-        return GetValueImpl<T>(valueField[name]);
+        try
+        {
+            var field = valueField[name];
+            if (field == null)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Field '{name}' not found in {valueField.TypeName}!");
+            }
+            else if (field.IsDummy)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Field '{name}' is DUMMY in {valueField.TypeName}!");
+            }
+            return GetValueImpl<T>(field);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WARNING: Exception accessing field '{name}' in {valueField.TypeName}: {ex.GetType().Name} - {ex.Message}");
+            return default(T)!;
+        }
     }
 
     public T GetValue<T>(int index)
@@ -36,16 +61,76 @@ public class AfAssetField(AssetTypeValueField valueField, AfAssetNamer namer) : 
 
     public List<T> GetValueArray<T>(string name, Func<IAssetField, T> mapper)
     {
-        return GetValueArrayImpl(valueField[name]["Array"], mapper);
+        try
+        {
+            var field = valueField[name];
+            
+            // Check if the field itself is null or dummy before accessing children
+            if (field == null || field.IsDummy)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Field '{name}' is null or dummy, returning empty array");
+                return [];
+            }
+
+            var arrayField = field["Array"];
+            
+            // Check if the Array child is null or dummy
+            if (arrayField == null || arrayField.IsDummy)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Array field for '{name}' is null or dummy, returning empty array");
+                return [];
+            }
+
+            return GetValueArrayImpl(arrayField, mapper);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WARNING: Exception in GetValueArray for '{name}': {ex.Message}");
+            return [];
+        }
     }
 
     public List<T> GetValueArray<T>(int index, Func<IAssetField, T> mapper)
     {
-        return GetValueArrayImpl(valueField[index][0], mapper);
+        try
+        {
+            var field = valueField[index];
+            
+            // Check if the field itself is null or dummy before accessing children
+            if (field == null || field.IsDummy)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Field at index {index} is null or dummy, returning empty array");
+                return [];
+            }
+
+            var arrayField = field[0];
+            
+            // Check if the Array child is null or dummy
+            if (arrayField == null || arrayField.IsDummy)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Array field at index {index} is null or dummy, returning empty array");
+                return [];
+            }
+
+            return GetValueArrayImpl(arrayField, mapper);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WARNING: Exception in GetValueArray at index {index}: {ex.Message}");
+            return [];
+        }
     }
 
     private T GetValueImpl<T>(AssetTypeValueField field)
     {
+        // Check if field is DUMMY before trying to read it
+        if (field == null || field.IsDummy)
+        {
+            System.Diagnostics.Debug.WriteLine($"WARNING: Attempting to read value from DUMMY or null field! Type: {typeof(T).Name}");
+            // Return default value for the type
+            return default(T)!;
+        }
+
         Type paramType = typeof(T);
         Type genericType;
 
@@ -252,9 +337,40 @@ public class AfAssetField(AssetTypeValueField valueField, AfAssetNamer namer) : 
 
     private List<T> GetValueArrayImpl<T>(AssetTypeValueField field, Func<IAssetField, T> mapper)
     {
+        // Check if field is null or dummy
+        if (field == null || field.IsDummy)
+        {
+            System.Diagnostics.Debug.WriteLine($"WARNING: GetValueArrayImpl called with null or dummy field!");
+            return [];
+        }
+
+        // Arrays should have children, but if they don't (empty array), return empty list
+        if (field.Children.Count == 0)
+        {
+            System.Diagnostics.Debug.WriteLine($"WARNING: Array field has no children (empty array)");
+            return [];
+        }
+
         var list = new List<T>(field.Children.Count);
         foreach (var child in field)
-            list.Add(mapper(new AfAssetField(child, namer)));
+        {
+            // Skip dummy children
+            if (child.IsDummy)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Skipping dummy child in array");
+                continue;
+            }
+
+            try
+            {
+                list.Add(mapper(new AfAssetField(child, namer)));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Failed to map array element: {ex.Message}");
+                // Continue processing other elements
+            }
+        }
 
         return list;
     }

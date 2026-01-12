@@ -169,7 +169,36 @@ public partial class MainWindowViewModel : ViewModelBase
                 return;
             }
 
-            var fsmObject = new FsmPlaymaker(new AfAssetField(fsmField, new AfAssetNamer(_manager, fsmFileInst)));
+            FsmPlaymaker? fsmObject = null;
+            try
+            {
+                fsmObject = new FsmPlaymaker(new AfAssetField(fsmField, new AfAssetNamer(_manager, fsmFileInst)));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Exception creating FsmPlaymaker: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
+                
+                // Re-throw if it's not a dummy field exception
+                if (!ex.Message.Contains("dummy", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw;
+                }
+                
+                // If it's a dummy field exception, show a user-friendly message and return
+                await MessageBoxUtil.ShowDialog("FSM Load Warning", 
+                    $"This FSM loaded with some missing data due to unsupported field types.\n\n" +
+                    $"The FSM structure (states, transitions, events) should still be visible, " +
+                    $"but some action parameters may be missing.\n\n" +
+                    $"Error: {ex.Message}");
+                return;
+            }
+
+            if (fsmObject == null)
+            {
+                await MessageBoxUtil.ShowDialog("Cannot load FSM", "Failed to create FSM object.");
+                return;
+            }
 
             // get gameobject name
             var namer = new AfAssetNamer(_manager, fsmFileInst);
@@ -198,6 +227,8 @@ public partial class MainWindowViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"LoadPlaymakerFsm exception: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
             await MessageBoxUtil.ShowDialog("Error loading FSM", $"Failed to load FSM:\n{ex.Message}\n\nThis FSM may be corrupted or use an unsupported format.");
         }
     }

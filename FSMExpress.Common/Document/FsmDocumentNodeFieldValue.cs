@@ -39,15 +39,18 @@ public class FsmDocumentNodeFieldArrayValue(string typeName, string name, int co
     public override FsmDocumentNodeDataFieldKind FieldKind => FsmDocumentNodeDataFieldKind.Array;
 }
 
-public class FsmDocumentNodeFieldFallbackValue(object value, int indent = 0) : FsmDocumentNodeFieldValue
+public class FsmDocumentNodeFieldFallbackValue(object? value, int indent = 0) : FsmDocumentNodeFieldValue
 {
     public override int DisplayIndent => indent;
-    public override string DisplayType => value.GetType().Name;
-    public override string DisplayString => value.ToString() ?? string.Empty;
+    public override string DisplayType => value?.GetType().Name ?? "null";
+    public override string DisplayString => value?.ToString() ?? "null";
     public override FsmDocumentNodeDataFieldKind FieldKind
     {
         get
         {
+            if (value == null)
+                return FsmDocumentNodeDataFieldKind.Object;
+
             var typeName = value.GetType().Name;
             if (typeName.Contains("bool", StringComparison.InvariantCultureIgnoreCase))
                 return FsmDocumentNodeDataFieldKind.Boolean;
