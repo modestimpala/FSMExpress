@@ -669,7 +669,245 @@ public partial class MainWindowViewModel : ViewModelBase
             }
         }
 
-        await MessageBoxUtil.ShowDialog("Batch Export Complete", 
+        await MessageBoxUtil.ShowDialog("Batch Export Complete",
+            $"Exported {successCount} FSM(s) successfully.\n" +
+            (failCount > 0 ? $"{failCount} FSM(s) failed to export." : ""));
+    }
+
+    [RelayCommand]
+    public async Task FileOpenAndExportAll()
+    {
+        var storageProvider = StorageService.GetStorageProvider();
+        if (storageProvider is null)
+            return;
+
+        // Step 1: Pick the file to open
+        var fileResult = await storageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Open a file with FSMs",
+            FileTypeFilter = [StorageService.Any],
+        });
+
+        var fileNames = FileDialogUtils.GetOpenFileDialogFiles(fileResult);
+        if (fileNames.Length == 0)
+            return;
+
+        var fileName = fileNames[0];
+
+        // Step 2: Load the file and get all FSMs (without showing dialog)
+        AssetsFileInstance fileInst;
+
+        var fileType = FileTypeDetector.DetectFileType(fileName);
+        if (fileType == DetectedFileType.BundleFile)
+        {
+            if (_catalog is not null)
+            {
+                await LoadCatalogDeps(fileName);
+            }
+
+            var bunInst = _manager.LoadBundleFile(fileName);
+            var maybeFileInst = LoadBundleMainFile(bunInst);
+            if (maybeFileInst == null)
+            {
+                await MessageBoxUtil.ShowDialog("Unsupported type", "Sorry, unsure which file to open in this bundle.");
+                return;
+            }
+
+            fileInst = maybeFileInst;
+        }
+        else if (fileType == DetectedFileType.AssetsFile)
+        {
+            fileInst = _manager.LoadAssetsFile(fileName);
+        }
+        else
+        {
+            await MessageBoxUtil.ShowDialog("Unsupported type", "Could not detect this as a valid Unity file.");
+            return;
+        }
+
+        if (!_manager.LoadClassDatabase(fileInst))
+        {
+            await MessageBoxUtil.ShowDialog("Class database failed to load", "Couldn't load class database class. Check if classdata.tpk exists?");
+            return;
+        }
+
+        // Step 3: Pick the output folder BEFORE loading FSMs to avoid wasted memory
+        var folderResult = await storageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Select folder to export all FSMs"
+        });
+
+        var folderNames = FileDialogUtils.GetOpenFolderDialogFolders(folderResult);
+        if (folderNames.Length == 0)
+            return;
+
+        var folderPath = folderNames[0];
+
+        // Load MonoBehaviours to properly detect PlayMaker FSMs
+        if (!_manager.LoadMonoBehaviours(fileInst))
+        {
+            await MessageBoxUtil.ShowDialog("Mono error",
+                "Couldn't find game assemblies.\n\n" +
+                "Looking for:\n" +
+                "- Managed folder with .dll files, OR\n" +
+                "- IL2CPP files (global-metadata.dat)\n\n" +
+                "Try setting the game path to the [GameName]_Data folder via Config > Set game path");
+            return;
+        }
+
+        // Step 4: Scan for FSM asset infos (lightweight - just references, not full data)
+        TitleText = "Scanning for FSMs...";
+        await Task.Yield(); // Allow UI to update
+
+        var fsmInfos = new List<AssetFileInfo>();
+        foreach (var info in fileInst.file.AssetInfos)
+        {
+            var actualTypeId = info.GetTypeId(fileInst.file);
+            bool isMonoBehaviour = info.TypeId == (int)AssetClassID.MonoBehaviour ||
+                                   actualTypeId == (int)AssetClassID.MonoBehaviour ||
+                                   info.TypeId < 0;
+
+            if (!isMonoBehaviour)
+                continue;
+
+            // Just collect info references - don't load the full baseField yet
+            fsmInfos.Add(info);
+        }
+
+        if (fsmInfos.Count == 0)
+        {
+            TitleText = DEFAULT_TITLE_TEXT;
+            await MessageBoxUtil.ShowDialog("No FSMs found", "No MonoBehaviour assets were found in this file.");
+            return;
+        }
+
+        // Step 5: Process and export FSMs one at a time (streaming approach to save memory)
+        int successCount = 0;
+        int failCount = 0;
+        int totalProcessed = 0;
+        var exportedNames = new HashSet<string>(); // Track exported filenames for deduplication
+
+        foreach (var info in fsmInfos)
+        {
+            totalProcessed++;
+
+            // Update progress every FSM
+            TitleText = $"Exporting FSMs... ({totalProcessed}/{fsmInfos.Count}) - {successCount} exported, {failCount} failed";
+
+            // Yield UI thread and trigger GC periodically to keep memory usage down
+            if (totalProcessed % 10 == 0)
+            {
+                await Task.Yield();
+                GC.Collect(1, GCCollectionMode.Optimized, false);
+            }
+
+            try
+            {
+                // Load this specific FSM's baseField on-demand
+                // Use the same approach as PickFsms for consistency
+                AssetExternal ext;
+                if (info.TypeId < 0)
+                {
+                    var fsmBaseField = ReadMonoBehaviourSafe(_manager, fileInst, info);
+                    if (fsmBaseField == null)
+                    {
+                        failCount++;
+                        continue;
+                    }
+
+                    ext = new AssetExternal
+                    {
+                        file = fileInst,
+                        info = info,
+                        baseField = fsmBaseField
+                    };
+                }
+                else
+                {
+                    // Use GetExtAsset which properly handles template enhancement
+                    ext = _manager.GetExtAsset(fileInst, 0, info.PathId);
+                    if (ext.baseField == null)
+                    {
+                        failCount++;
+                        continue;
+                    }
+                }
+
+                var baseField = ext.baseField;
+
+                // Check if this MonoBehaviour has an "fsm" field (PlayMaker FSM)
+                var fsmField = baseField["fsm"];
+                if (fsmField == null || fsmField.IsDummy)
+                {
+                    // Not a PlayMaker FSM, skip silently
+                    continue;
+                }
+
+                var fsmObject = new FsmPlaymaker(new AfAssetField(fsmField, new AfAssetNamer(_manager, fileInst)));
+
+                // Get GameObject name for better file naming
+                var namer = new AfAssetNamer(_manager, fileInst);
+                var goPtr = baseField["m_GameObject"];
+                string goName = "Unknown";
+                if (goPtr != null && !goPtr.IsDummy)
+                {
+                    var fileIdField = goPtr["m_FileID"];
+                    var pathIdField = goPtr["m_PathID"];
+                    if (fileIdField != null && !fileIdField.IsDummy && pathIdField != null && !pathIdField.IsDummy)
+                    {
+                        goName = namer.GetName(fileIdField.AsInt, pathIdField.AsLong) ?? "Unknown";
+                    }
+                }
+
+                var fsmDoc = fsmObject.MakeDocument();
+                fsmDoc.SourceName = fileName;
+
+                // Create a safe filename with deduplication
+                var baseFileName = $"{goName}_{fsmDoc.Name}"
+                    .Replace(" ", "_")
+                    .Replace("/", "_")
+                    .Replace("\\", "_")
+                    .Replace(":", "_")
+                    .Replace("*", "_")
+                    .Replace("?", "_")
+                    .Replace("\"", "_")
+                    .Replace("<", "_")
+                    .Replace(">", "_")
+                    .Replace("|", "_");
+
+                var safeFileName = $"{baseFileName}_detailed.json";
+
+                // Handle duplicate filenames efficiently using HashSet
+                int counter = 1;
+                while (exportedNames.Contains(safeFileName))
+                {
+                    safeFileName = $"{baseFileName}_{counter}_detailed.json";
+                    counter++;
+                }
+                exportedNames.Add(safeFileName);
+
+                var filePath = Path.Combine(folderPath, safeFileName);
+                FsmJsonExporter.ExportDetailed(fsmDoc, filePath);
+                successCount++;
+
+                // Clear references to allow GC to collect this FSM's data
+                baseField = null;
+                fsmField = null;
+                fsmObject = null;
+                fsmDoc = null;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to export FSM PathId={info.PathId}: {ex.Message}");
+                failCount++;
+            }
+        }
+
+        // Reset title
+        TitleText = DEFAULT_TITLE_TEXT;
+
+        await MessageBoxUtil.ShowDialog("Batch Export Complete",
+            $"Scanned {fsmInfos.Count} MonoBehaviour asset(s).\n" +
             $"Exported {successCount} FSM(s) successfully.\n" +
             (failCount > 0 ? $"{failCount} FSM(s) failed to export." : ""));
     }

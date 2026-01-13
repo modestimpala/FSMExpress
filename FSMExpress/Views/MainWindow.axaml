@@ -151,6 +151,9 @@
         <MenuItem
           Header="Export _all open FSMs (detailed JSON)" Command="{Binding ExportAllDetailedJsonCommand}"
           IsEnabled="{Binding !!Documents.Count}" />
+        <Separator />
+        <MenuItem
+          Header="Open file and export _all FSMs to folder" Command="{Binding FileOpenAndExportAllCommand}" />
       </MenuItem>
       <MenuItem Header="_Config">
         <MenuItem

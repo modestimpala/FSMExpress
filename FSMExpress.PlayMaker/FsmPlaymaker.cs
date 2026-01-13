@@ -1,4 +1,4 @@
-﻿using AssetsTools.NET;
+using AssetsTools.NET;
 using FSMExpress.Common.Document;
 using FSMExpress.Common.Interfaces;
 using FSMExpress.PlayMaker.Structs;
@@ -20,7 +20,7 @@ public class FsmPlaymaker : IFsmMonoBehaviour
     public List<FsmTransition> GlobalTransitions { get; } = [];
     public FsmVariables Variables { get; set; }
 
-    // assetstools has no way of getting us the assembly/namespace
+    // assettsools has no way of getting us the assembly/namespace
     // through its api, so we'll just assume this is always the
     // same namespace/assembly and hardcode it.
     const string PM_NAMESPACE = "HutongGames.PlayMaker";
@@ -98,13 +98,16 @@ public class FsmPlaymaker : IFsmMonoBehaviour
             }
 
             var stateActionData = state.ActionData;
+            // Create array indices tracker that persists across all actions in this state
+            var arrayIndices = new Dictionary<ParamDataType, int>();
+            
             for (var actionIdx = 0; actionIdx < stateActionData.ActionNames.Count; actionIdx++)
             {
                 var actionName = TrimFullNameToClassName(stateActionData.ActionNames[actionIdx]);
                 var actionEnabled = stateActionData.ActionEnabled[actionIdx] != 0;
 
                 docNode.Fields.Add(new FsmDocumentNodeClassField(new AssetTypeReference(actionName, "Namespace", "AssemblyName"), actionEnabled));
-                ConvertActionData(docNode.Fields, stateActionData, actionIdx);
+                ConvertActionData(docNode.Fields, stateActionData, actionIdx, arrayIndices);
             }
         }
     }
@@ -390,7 +393,7 @@ public class FsmPlaymaker : IFsmMonoBehaviour
         }
     }
 
-    private FsmArrayInfo ConvertActionDataArray(FsmActionData actionData, ref int paramIdx)
+    private FsmArrayInfo ConvertActionDataArray(FsmActionData actionData, ref int paramIdx, Dictionary<ParamDataType, int> arrayIndices)
     {
         var type = actionData.ArrayParamTypes[actionData.ParamDataPos[paramIdx]];
         var size = actionData.ArrayParamSizes[actionData.ParamDataPos[paramIdx]];
@@ -399,13 +402,13 @@ public class FsmPlaymaker : IFsmMonoBehaviour
         for (var eleIdx = 0; eleIdx < size; eleIdx++)
         {
             paramIdx++;
-            elements[eleIdx] = ConvertFsmObject(actionData, ref paramIdx);
+            elements[eleIdx] = ConvertFsmObject(actionData, ref paramIdx, arrayIndices);
         }
 
         return new FsmArrayInfo(TrimFullNameToClassName(type), elements);
     }
 
-    private void ConvertActionData(List<FsmDocumentNodeField> fields, FsmActionData actionData, int actionIdx)
+    private void ConvertActionData(List<FsmDocumentNodeField> fields, FsmActionData actionData, int actionIdx, Dictionary<ParamDataType, int> arrayIndices)
     {
         var startIndex = actionData.ActionStartIndex[actionIdx];
         var endIndex = (actionIdx == actionData.ActionNames.Count - 1)
@@ -417,7 +420,7 @@ public class FsmPlaymaker : IFsmMonoBehaviour
             if (paramIdx < actionData.ParamName.Count)
             {
                 var paramName = actionData.ParamName[paramIdx];
-                var paramObj = ConvertFsmObject(actionData, ref paramIdx);
+                var paramObj = ConvertFsmObject(actionData, ref paramIdx, arrayIndices);
                 fields.Add(new FsmDocumentNodeDataField(paramName, ConvertObjectToNodeFieldValue(paramObj, false)));
                 if (paramObj is FsmArrayInfo objArrayInf)
                 {
@@ -435,7 +438,7 @@ public class FsmPlaymaker : IFsmMonoBehaviour
         }
     }
 
-    private object ConvertFsmObject(FsmActionData actionData, ref int paramIdx)
+    private object ConvertFsmObject(FsmActionData actionData, ref int paramIdx, Dictionary<ParamDataType, int> arrayIndices)
     {
         var paramDataType = actionData.ParamDataType[paramIdx];
         var paramDataPos = actionData.ParamDataPos[paramIdx];
@@ -471,33 +474,35 @@ public class FsmPlaymaker : IFsmMonoBehaviour
                 ParamDataType.FsmRect when Version == 1 => new FsmRect { Value = new Rect { X = r.ReadSingle(), Y = r.ReadSingle(), Width = r.ReadSingle(), Height = r.ReadSingle() } },
                 /////////////////////////////////////////////////////////
 
-                ParamDataType.FsmBool when Version > 1 => TryGetArrayElement(actionData.FsmBoolParams, paramDataPos),
-                ParamDataType.FsmInt when Version > 1 => TryGetArrayElement(actionData.FsmIntParams, paramDataPos),
-                ParamDataType.FsmFloat when Version > 1 => TryGetArrayElement(actionData.FsmFloatParams, paramDataPos),
-                ParamDataType.FsmVector2 when Version > 1 => TryGetArrayElement(actionData.FsmVector2Params, paramDataPos),
-                ParamDataType.FsmVector3 when Version > 1 => TryGetArrayElement(actionData.FsmVector3Params, paramDataPos),
-                ParamDataType.FsmQuaternion when Version > 1 => TryGetArrayElement(actionData.FsmQuaternionParams, paramDataPos),
-                ParamDataType.FsmColor when Version > 1 => TryGetArrayElement(actionData.FsmColorParams, paramDataPos),
-                ParamDataType.FsmRect when Version > 1 => TryGetArrayElement(actionData.FsmRectParams, paramDataPos),
+                // Version 0 and > 1 use typed parameter arrays
+                ParamDataType.FsmBool when Version != 1 => GetNextArrayElement(actionData.FsmBoolParams, paramDataType, arrayIndices),
+                ParamDataType.FsmInt when Version != 1 => GetNextArrayElement(actionData.FsmIntParams, paramDataType, arrayIndices),
+                ParamDataType.FsmFloat when Version != 1 => GetNextArrayElement(actionData.FsmFloatParams, paramDataType, arrayIndices),
+                ParamDataType.FsmVector2 when Version != 1 => GetNextArrayElement(actionData.FsmVector2Params, paramDataType, arrayIndices),
+                ParamDataType.FsmVector3 when Version != 1 => GetNextArrayElement(actionData.FsmVector3Params, paramDataType, arrayIndices),
+                ParamDataType.FsmQuaternion when Version != 1 => GetNextArrayElement(actionData.FsmQuaternionParams, paramDataType, arrayIndices),
+                ParamDataType.FsmColor when Version != 1 => GetNextArrayElement(actionData.FsmColorParams, paramDataType, arrayIndices),
+                ParamDataType.FsmRect when Version != 1 => GetNextArrayElement(actionData.FsmRectParams, paramDataType, arrayIndices),
                 ///////////////////////////////////////////////////////// 
-                ParamDataType.FsmEnum => TryGetArrayElement(actionData.FsmEnumParams, paramDataPos),
-                ParamDataType.FsmGameObject => TryGetArrayElement(actionData.FsmGameObjectParams, paramDataPos),
-                ParamDataType.FsmOwnerDefault => TryGetArrayElement(actionData.FsmOwnerDefaultParams, paramDataPos),
-                ParamDataType.FsmObject => TryGetArrayElement(actionData.FsmObjectParams, paramDataPos),
-                ParamDataType.FsmVar => TryGetArrayElement(actionData.FsmVarParams, paramDataPos),
-                ParamDataType.FsmString => TryGetArrayElement(actionData.FsmStringParams, paramDataPos),
-                ParamDataType.FsmEvent => TryGetArrayElement(actionData.StringParams, paramDataPos),
-                ParamDataType.FsmEventTarget => TryGetArrayElement(actionData.FsmEventTargetParams, paramDataPos),
-                ParamDataType.FsmArray => TryGetArrayElement(actionData.FsmArrayParams, paramDataPos),
-                ParamDataType.ObjectReference => new FsmObject { Value = TryGetArrayElement(actionData.UnityObjectParams, paramDataPos) },
-                ParamDataType.FunctionCall => TryGetArrayElement(actionData.FunctionCallParams, paramDataPos),
-                ParamDataType.FsmTemplateControl => TryGetArrayElement(actionData.FsmTemplateControlParams, paramDataPos),
-                ParamDataType.Array => ConvertActionDataArray(actionData, ref paramIdx),
-                ParamDataType.FsmProperty => TryGetArrayElement(actionData.FsmPropertyParams, paramDataPos),
-                ParamDataType.FsmMaterial => new FsmMaterial(TryGetArrayElement(actionData.FsmObjectParams, paramDataPos)),
-                ParamDataType.FsmTexture => new FsmTexture(TryGetArrayElement(actionData.FsmObjectParams, paramDataPos)),
+                ParamDataType.FsmEnum => GetNextArrayElement(actionData.FsmEnumParams, paramDataType, arrayIndices),
+                ParamDataType.FsmGameObject => GetNextArrayElement(actionData.FsmGameObjectParams, paramDataType, arrayIndices),
+                ParamDataType.FsmOwnerDefault => GetNextArrayElement(actionData.FsmOwnerDefaultParams, paramDataType, arrayIndices),
+                ParamDataType.FsmObject => GetNextArrayElement(actionData.FsmObjectParams, paramDataType, arrayIndices),
+                ParamDataType.FsmVar => GetNextArrayElement(actionData.FsmVarParams, paramDataType, arrayIndices),
+                ParamDataType.FsmString => GetNextArrayElement(actionData.FsmStringParams, paramDataType, arrayIndices),
+                ParamDataType.FsmEvent => GetNextArrayElement(actionData.StringParams, paramDataType, arrayIndices),
+                ParamDataType.FsmEventTarget => GetNextArrayElement(actionData.FsmEventTargetParams, paramDataType, arrayIndices),
+                ParamDataType.FsmArray => GetNextArrayElement(actionData.FsmArrayParams, paramDataType, arrayIndices),
+                ParamDataType.ObjectReference => new FsmObject { Value = GetNextArrayElement(actionData.UnityObjectParams, paramDataType, arrayIndices) },
+                ParamDataType.FunctionCall => GetNextArrayElement(actionData.FunctionCallParams, paramDataType, arrayIndices),
+                ParamDataType.FsmTemplateControl => GetNextArrayElement(actionData.FsmTemplateControlParams, paramDataType, arrayIndices),
+                ParamDataType.Array => ConvertActionDataArray(actionData, ref paramIdx, arrayIndices),
+                ParamDataType.FsmProperty => GetNextArrayElement(actionData.FsmPropertyParams, paramDataType, arrayIndices),
+                ParamDataType.FsmMaterial => new FsmMaterial(GetNextArrayElement(actionData.FsmObjectParams, ParamDataType.FsmObject, arrayIndices)),
+                ParamDataType.FsmTexture => new FsmTexture(GetNextArrayElement(actionData.FsmObjectParams, ParamDataType.FsmObject, arrayIndices)),
                 _ => $"[{paramDataType} not implemented]",
             };
+            
         }
         catch
         {
@@ -526,6 +531,33 @@ public class FsmPlaymaker : IFsmMonoBehaviour
         }
 
         return ret;
+    }
+
+    /// <summary>
+    /// Gets the next element from a typed array, tracking indices per param type
+    /// </summary>
+    private static T? GetNextArrayElement<T>(List<T>? list, ParamDataType paramType, Dictionary<ParamDataType, int> arrayIndices)
+    {
+        if (list == null || list.Count == 0)
+        {
+            return default;
+        }
+
+        if (!arrayIndices.ContainsKey(paramType))
+        {
+            arrayIndices[paramType] = 0;
+        }
+
+        var index = arrayIndices[paramType];
+        
+        if (index >= list.Count)
+        {
+            return default;
+        }
+
+        var result = list[index];
+        arrayIndices[paramType] = index + 1;
+        return result;
     }
 
     /// <summary>
